@@ -1,1 +1,73 @@
-.github/workflows/build.yml
+name: Build Lift APK
+
+on:
+  push:
+    paths:
+      - 'project.zip'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - name: Get repo files
+        uses: actions/checkout@v4
+
+      - name: Unpack project.zip
+        run: |
+          test -f project.zip || { echo "project.zip is not in the repo root"; exit 1; }
+          mkdir -p src_unpacked
+          unzip -q -o project.zip -d src_unpacked
+          SETTINGS=$(find src_unpacked -maxdepth 3 -name settings.gradle.kts | head -n 1)
+          if [ -z "$SETTINGS" ]; then echo "settings.gradle.kts not found inside the zip"; exit 1; fi
+          echo "SRC=$(cd "$(dirname "$SETTINGS")" && pwd)" >> "$GITHUB_ENV"
+
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Download the background model
+        run: |
+          mkdir -p "$SRC/app/src/main/assets"
+          curl -L --fail --retry 5 --retry-delay 5 \
+            -o "$SRC/app/src/main/assets/model.onnx" \
+            "https://github.com/danielgatis/rembg/releases/download/v0.0.0/isnet-general-use.onnx"
+          SIZE=$(stat -c%s "$SRC/app/src/main/assets/model.onnx")
+          echo "model bytes: $SIZE"
+          [ "$SIZE" -gt 100000000 ] || { echo "Model download looks wrong"; exit 1; }
+
+      - name: Make sure there is a signing key
+        run: |
+          cd "$SRC"
+          if [ ! -f lift.keystore ]; then
+            keytool -genkeypair -keystore lift.keystore -storepass liftapp123 -keypass liftapp123 \
+              -alias lift -keyalg RSA -keysize 2048 -validity 36500 -dname "CN=Lift, O=Lift"
+          fi
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v3
+        with:
+          gradle-version: '8.9'
+
+      - name: Build the APK
+        run: |
+          cd "$SRC"
+          gradle assembleRelease --no-daemon --stacktrace
+
+      - name: Collect the APK
+        run: |
+          cp "$SRC/app/build/outputs/apk/release/app-release.apk" "$GITHUB_WORKSPACE/Lift.apk"
+          ls -lh "$GITHUB_WORKSPACE/Lift.apk"
+
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: build-${{ github.run_number }}
+          name: Lift build ${{ github.run_number }}
+          files: Lift.apk
